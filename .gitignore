@@ -1,0 +1,2 @@
+.gocache/
+server/db/mysql/adapter_encryption_test.go
