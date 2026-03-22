@@ -364,6 +364,11 @@ func updateUserAuth(msg *ClientComMessage, user *types.User, _ *auth.Rec, remote
 func addCreds(uid types.Uid, creds []MsgCredClient, extraTags []string,
 	lang string, tmpToken []byte) ([]string, []string, error) {
 	var validated []string
+	addValidated := func(method string) {
+		if !slices.Contains(validated, method) {
+			validated = append(validated, method)
+		}
+	}
 	for i := range creds {
 		cr := &creds[i]
 		vld := store.Store.GetValidator(cr.Method)
@@ -372,18 +377,37 @@ func addCreds(uid types.Uid, creds []MsgCredClient, extraTags []string,
 			continue
 		}
 
-		isNew, err := vld.Request(uid, cr.Value, lang, cr.Response, tmpToken)
+		vconf := globals.validators[cr.Method]
+		reqResp := cr.Response
+		if vconf.autovalidate {
+			// In autovalidate mode the credential must be accepted even if the client still sends resp.
+			reqResp = ""
+		}
+
+		isNew, err := vld.Request(uid, cr.Value, lang, reqResp, tmpToken)
 		if err != nil {
 			return nil, nil, err
+		}
+
+		if vconf.autovalidate {
+			if err := store.Users.ConfirmCred(uid, cr.Method); err != nil && err != types.ErrNotFound {
+				return nil, nil, err
+			}
+			addValidated(cr.Method)
+
+			if vconf.addToTags {
+				extraTags = append(extraTags, cr.Method+":"+cr.Value)
+			}
+			continue
 		}
 
 		if isNew && cr.Response != "" {
 			// If response is provided and vld.Request did not return an error, the new request was
 			// successfully validated.
-			validated = append(validated, cr.Method)
+			addValidated(cr.Method)
 
 			// Generate tags for these confirmed credentials.
-			if globals.validators[cr.Method].addToTags {
+			if vconf.addToTags {
 				extraTags = append(extraTags, cr.Method+":"+cr.Value)
 			}
 		}

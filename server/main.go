@@ -131,6 +131,7 @@ type credValidator struct {
 	// AuthLevel(s) which require this validator.
 	requiredAuthLvl []auth.Level
 	addToTags       bool
+	autovalidate    bool
 }
 
 var globals struct {
@@ -220,6 +221,9 @@ var globals struct {
 type validatorConfig struct {
 	// TRUE or FALSE to set
 	AddToTags bool `json:"add_to_tags"`
+	// If true, mark the credential as validated immediately after it was requested.
+	// Useful for local development when the validation code entry flow is not implemented yet.
+	Autovalidate bool `json:"autovalidate"`
 	//  Authentication level which triggers this validator: "auth", "anon"... or ""
 	Required []string `json:"required"`
 	// Validator params passed to validator unchanged.
@@ -521,6 +525,7 @@ func main() {
 		globals.validators[name] = credValidator{
 			requiredAuthLvl: reqLevels,
 			addToTags:       vconf.AddToTags,
+			autovalidate:    vconf.Autovalidate,
 		}
 	}
 
