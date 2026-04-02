@@ -5,11 +5,18 @@
 package mysql
 
 import (
+	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"hash/fnv"
+	"io"
 	"sort"
 	"strconv"
 	"strings"
@@ -28,6 +35,8 @@ type adapter struct {
 	db     *sqlx.DB
 	dsn    string
 	dbName string
+	// Optional AEAD cipher for encrypting stored message payloads at rest.
+	messageCipher cipher.AEAD
 	// Maximum number of records to return
 	maxResults int
 	// Maximum number of message records to return
@@ -76,7 +85,37 @@ type configType struct {
 	// DB request timeout (in seconds).
 	// If 0 (or negative), no timeout is applied.
 	SqlTimeout int `json:"sql_timeout,omitempty"`
+
+	// Optional base64-encoded AES key for encrypting message payloads stored in MySQL.
+	MessageEncryptionKey string `json:"message_encryption_key,omitempty"`
 }
+
+type encryptedMessageEnvelope struct {
+	Payload *encryptedMessagePayload `json:"__tinode_mysql_message_enc,omitempty"`
+}
+
+type encryptedMessagePayload struct {
+	Version    int    `json:"v"`
+	Nonce      string `json:"n"`
+	Ciphertext string `json:"c"`
+}
+
+type messageRow struct {
+	CreatedAt time.Time       `db:"createdat"`
+	UpdatedAt time.Time       `db:"updatedat"`
+	DeletedAt *time.Time      `db:"deletedat"`
+	DelId     int             `db:"delid"`
+	SeqId     int             `db:"seqid"`
+	Topic     string          `db:"topic"`
+	From      sql.NullInt64   `db:"from"`
+	Head      json.RawMessage `db:"head"`
+	Content   json.RawMessage `db:"content"`
+}
+
+const (
+	messageEncryptionVersion   = 1
+	messageEncryptionAADPrefix = "tinode:mysql:messages:"
+)
 
 func (a *adapter) getContext() (context.Context, context.CancelFunc) {
 	if a.sqlTimeout > 0 {
@@ -107,6 +146,10 @@ func (a *adapter) Open(jsonconfig json.RawMessage) error {
 	config := configType{Config: *defaultCfg}
 	if err = json.Unmarshal(jsonconfig, &config); err != nil {
 		return errors.New("mysql adapter failed to parse config: " + err.Error())
+	}
+
+	if a.messageCipher, err = initMessageCipher(config.MessageEncryptionKey); err != nil {
+		return err
 	}
 
 	if dsn := config.FormatDSN(); dsn != defaultCfg.FormatDSN() {
@@ -176,6 +219,154 @@ func (a *adapter) Open(jsonconfig json.RawMessage) error {
 		}
 	}
 	return err
+}
+
+func initMessageCipher(key string) (cipher.AEAD, error) {
+	if key == "" {
+		return nil, nil
+	}
+
+	rawKey, err := base64.StdEncoding.DecodeString(key)
+	if err != nil {
+		return nil, errors.New("mysql config: message_encryption_key must be valid base64")
+	}
+
+	switch len(rawKey) {
+	case 16, 24, 32:
+	default:
+		return nil, errors.New("mysql config: message_encryption_key must decode to 16, 24, or 32 bytes")
+	}
+
+	block, err := aes.NewCipher(rawKey)
+	if err != nil {
+		return nil, fmt.Errorf("mysql config: failed to initialize message encryption cipher: %w", err)
+	}
+
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("mysql config: failed to initialize message encryption mode: %w", err)
+	}
+
+	return aead, nil
+}
+
+func (a *adapter) messageAAD(field string) []byte {
+	return []byte(messageEncryptionAADPrefix + field)
+}
+
+func (a *adapter) encodeStoredMessageField(field string, value any) ([]byte, error) {
+	raw := common.ToJSON(value)
+	if raw == nil || a.messageCipher == nil {
+		return raw, nil
+	}
+
+	nonce := make([]byte, a.messageCipher.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, fmt.Errorf("mysql adapter: failed to generate nonce for %s: %w", field, err)
+	}
+
+	envelope := encryptedMessageEnvelope{
+		Payload: &encryptedMessagePayload{
+			Version:    messageEncryptionVersion,
+			Nonce:      base64.StdEncoding.EncodeToString(nonce),
+			Ciphertext: base64.StdEncoding.EncodeToString(a.messageCipher.Seal(nil, nonce, raw, a.messageAAD(field))),
+		},
+	}
+
+	encoded, err := json.Marshal(envelope)
+	if err != nil {
+		return nil, fmt.Errorf("mysql adapter: failed to marshal encrypted %s: %w", field, err)
+	}
+
+	return encoded, nil
+}
+
+func (a *adapter) decodeStoredMessageField(field string, raw []byte) ([]byte, error) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 {
+		return raw, nil
+	}
+
+	envelope, encrypted, err := parseEncryptedMessageEnvelope(raw)
+	if err != nil {
+		return nil, fmt.Errorf("mysql adapter: failed to parse stored %s: %w", field, err)
+	}
+	if !encrypted {
+		return raw, nil
+	}
+	if a.messageCipher == nil {
+		return nil, fmt.Errorf("mysql adapter: %s is encrypted but message_encryption_key is not configured", field)
+	}
+	if envelope.Version != messageEncryptionVersion {
+		return nil, fmt.Errorf("mysql adapter: unsupported %s encryption version %d", field, envelope.Version)
+	}
+
+	nonce, err := base64.StdEncoding.DecodeString(envelope.Nonce)
+	if err != nil {
+		return nil, fmt.Errorf("mysql adapter: invalid %s nonce: %w", field, err)
+	}
+	ciphertext, err := base64.StdEncoding.DecodeString(envelope.Ciphertext)
+	if err != nil {
+		return nil, fmt.Errorf("mysql adapter: invalid %s ciphertext: %w", field, err)
+	}
+
+	plaintext, err := a.messageCipher.Open(nil, nonce, ciphertext, a.messageAAD(field))
+	if err != nil {
+		return nil, fmt.Errorf("mysql adapter: failed to decrypt %s: %w", field, err)
+	}
+
+	return plaintext, nil
+}
+
+func parseEncryptedMessageEnvelope(raw []byte) (*encryptedMessagePayload, bool, error) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || raw[0] != '{' {
+		return nil, false, nil
+	}
+
+	var envelope encryptedMessageEnvelope
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return nil, false, nil
+	}
+	if envelope.Payload == nil {
+		return nil, false, nil
+	}
+
+	return envelope.Payload, true, nil
+}
+
+func (a *adapter) decodeMessageHead(raw []byte) (t.KVMap, error) {
+	raw, err := a.decodeStoredMessageField("head", raw)
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) == 0 {
+		return nil, nil
+	}
+
+	var head t.KVMap
+	if err = json.Unmarshal(raw, &head); err != nil {
+		return nil, fmt.Errorf("mysql adapter: failed to decode message head: %w", err)
+	}
+
+	return head, nil
+}
+
+func (a *adapter) decodeMessageContent(raw []byte) (any, error) {
+	raw, err := a.decodeStoredMessageField("content", raw)
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) == 0 {
+		return nil, nil
+	}
+
+	var content any
+	if err = json.Unmarshal(raw, &content); err != nil {
+		return nil, fmt.Errorf("mysql adapter: failed to decode message content: %w", err)
+	}
+
+	return content, nil
 }
 
 // Close closes the underlying database connection
@@ -2663,12 +2854,21 @@ func (a *adapter) MessageSave(msg *t.Message) error {
 	if cancel != nil {
 		defer cancel()
 	}
+
+	head, err := a.encodeStoredMessageField("head", msg.Head)
+	if err != nil {
+		return err
+	}
+	content, err := a.encodeStoredMessageField("content", msg.Content)
+	if err != nil {
+		return err
+	}
 	// store assignes message ID, but we don't use it. Message IDs are not used anywhere.
 	// Using a sequential ID provided by the database.
 	res, err := a.db.ExecContext(ctx,
 		"INSERT INTO messages(createdAt,updatedAt,seqid,topic,`from`,head,content) VALUES(?,?,?,?,?,?,?)",
 		msg.CreatedAt, msg.UpdatedAt, msg.SeqId, msg.Topic,
-		store.DecodeUid(t.ParseUid(msg.From)), msg.Head, common.ToJSON(msg.Content))
+		store.DecodeUid(t.ParseUid(msg.From)), head, content)
 	if err == nil {
 		id, _ := res.LastInsertId()
 		// Replacing ID given by store by ID given by the DB.
@@ -2731,12 +2931,37 @@ func (a *adapter) MessageGetAll(topic string, forUser t.Uid, opts *t.QueryOpt) (
 
 	msgs := make([]t.Message, 0, limit)
 	for rows.Next() {
-		var msg t.Message
-		if err = rows.StructScan(&msg); err != nil {
+		var row messageRow
+		if err = rows.StructScan(&row); err != nil {
 			break
 		}
-		msg.From = common.EncodeUidString(msg.From).String()
-		msg.Content = common.FromJSON(msg.Content)
+
+		head, headErr := a.decodeMessageHead(row.Head)
+		if headErr != nil {
+			err = headErr
+			break
+		}
+		content, contentErr := a.decodeMessageContent(row.Content)
+		if contentErr != nil {
+			err = contentErr
+			break
+		}
+
+		msg := t.Message{
+			ObjHeader: t.ObjHeader{
+				CreatedAt: row.CreatedAt,
+				UpdatedAt: row.UpdatedAt,
+			},
+			DeletedAt: row.DeletedAt,
+			DelId:     row.DelId,
+			SeqId:     row.SeqId,
+			Topic:     row.Topic,
+			Head:      head,
+			Content:   content,
+		}
+		if row.From.Valid && row.From.Int64 != 0 {
+			msg.From = store.EncodeUid(row.From.Int64).String()
+		}
 		msgs = append(msgs, msg)
 	}
 	if err == nil {
