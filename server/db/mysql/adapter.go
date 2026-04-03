@@ -26,6 +26,7 @@ import (
 	"github.com/jmoiron/sqlx"
 	"github.com/tinode/chat/server/auth"
 	"github.com/tinode/chat/server/db/common"
+	"github.com/tinode/chat/server/media"
 	"github.com/tinode/chat/server/store"
 	t "github.com/tinode/chat/server/store/types"
 )
@@ -37,6 +38,8 @@ type adapter struct {
 	dbName string
 	// Optional AEAD cipher for encrypting stored message payloads at rest.
 	messageCipher cipher.AEAD
+	// Optional AEAD cipher for encrypting uploaded file payloads at rest.
+	fileCipher cipher.AEAD
 	// Maximum number of records to return
 	maxResults int
 	// Maximum number of message records to return
@@ -88,6 +91,8 @@ type configType struct {
 
 	// Optional base64-encoded AES key for encrypting message payloads stored in MySQL.
 	MessageEncryptionKey string `json:"message_encryption_key,omitempty"`
+	// Optional base64-encoded AES key for encrypting media payloads stored by local media handlers.
+	FileEncryptionKey string `json:"file_encryption_key,omitempty"`
 }
 
 type encryptedMessageEnvelope struct {
@@ -115,6 +120,7 @@ type messageRow struct {
 const (
 	messageEncryptionVersion   = 1
 	messageEncryptionAADPrefix = "tinode:mysql:messages:"
+	fileEncryptionAADPrefix    = "tinode:mysql:files:"
 )
 
 func (a *adapter) getContext() (context.Context, context.CancelFunc) {
@@ -148,7 +154,10 @@ func (a *adapter) Open(jsonconfig json.RawMessage) error {
 		return errors.New("mysql adapter failed to parse config: " + err.Error())
 	}
 
-	if a.messageCipher, err = initMessageCipher(config.MessageEncryptionKey); err != nil {
+	if a.messageCipher, err = initConfiguredCipher("message_encryption_key", config.MessageEncryptionKey); err != nil {
+		return err
+	}
+	if a.fileCipher, err = initConfiguredCipher("file_encryption_key", config.FileEncryptionKey); err != nil {
 		return err
 	}
 
@@ -221,33 +230,45 @@ func (a *adapter) Open(jsonconfig json.RawMessage) error {
 	return err
 }
 
-func initMessageCipher(key string) (cipher.AEAD, error) {
+func initConfiguredCipher(configField, key string) (cipher.AEAD, error) {
 	if key == "" {
 		return nil, nil
 	}
 
 	rawKey, err := base64.StdEncoding.DecodeString(key)
 	if err != nil {
-		return nil, errors.New("mysql config: message_encryption_key must be valid base64")
+		return nil, fmt.Errorf("mysql config: %s must be valid base64", configField)
 	}
 
 	switch len(rawKey) {
 	case 16, 24, 32:
 	default:
-		return nil, errors.New("mysql config: message_encryption_key must decode to 16, 24, or 32 bytes")
+		return nil, fmt.Errorf("mysql config: %s must decode to 16, 24, or 32 bytes", configField)
 	}
 
 	block, err := aes.NewCipher(rawKey)
 	if err != nil {
-		return nil, fmt.Errorf("mysql config: failed to initialize message encryption cipher: %w", err)
+		return nil, fmt.Errorf("mysql config: failed to initialize %s cipher: %w", configField, err)
 	}
 
 	aead, err := cipher.NewGCM(block)
 	if err != nil {
-		return nil, fmt.Errorf("mysql config: failed to initialize message encryption mode: %w", err)
+		return nil, fmt.Errorf("mysql config: failed to initialize %s mode: %w", configField, err)
 	}
 
 	return aead, nil
+}
+
+// GetFileCryptoConfig returns optional media encryption settings for local media handlers.
+func (a *adapter) GetFileCryptoConfig() *media.FileCryptoConfig {
+	if a.fileCipher == nil {
+		return nil
+	}
+
+	return &media.FileCryptoConfig{
+		Cipher:    a.fileCipher,
+		AADPrefix: fileEncryptionAADPrefix,
+	}
 }
 
 func (a *adapter) messageAAD(field string) []byte {

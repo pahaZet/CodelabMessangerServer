@@ -41,6 +41,7 @@ type fshandler struct {
 	fileConfig
 	// corsOrigins parsed allowed origins.
 	corsOrigins []media.AllowedOrigin
+	fileCrypto  *media.FileCryptoConfig
 }
 
 func (fh *fshandler) Init(jsconf string) error {
@@ -65,6 +66,10 @@ func (fh *fshandler) Init(jsconf string) error {
 	fh.corsOrigins, err = media.ParseCORSAllow(fh.CorsOrigins)
 	if err != nil {
 		return errors.New("failed to parse CORS allowed origins: " + err.Error())
+	}
+	fh.fileCrypto = nil
+	if provider, ok := store.Store.GetAdapter().(media.FileCryptoProvider); ok {
+		fh.fileCrypto = provider.GetFileCryptoConfig()
 	}
 	// Make sure the upload directory exists.
 	return os.MkdirAll(fh.FileUploadDirectory, 0777)
@@ -130,7 +135,7 @@ func (fh *fshandler) Upload(fdef *types.FileDef, file io.Reader) (string, int64,
 		return "", 0, err
 	}
 
-	size, err := io.Copy(outfile, file)
+	size, err := media.EncryptStream(outfile, file, fh.fileCrypto, fdef.Id)
 	outfile.Close()
 	if err != nil {
 		os.Remove(location)
@@ -173,7 +178,12 @@ func (fh *fshandler) Download(url string) (*types.FileDef, media.ReadSeekCloser,
 		return nil, nil, err
 	}
 
-	return fd, file, nil
+	rsc, err := media.WrapEncryptedReadSeekCloser(file, fh.fileCrypto, fd.Id)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return fd, rsc, nil
 }
 
 // Delete deletes files from storage by provided slice of locations.

@@ -102,6 +102,11 @@ func (ah *awshandler) Init(jsconf string) error {
 	if err != nil {
 		return errors.New("failed to parse CORS allowed origins: " + err.Error())
 	}
+	if provider, ok := store.Store.GetAdapter().(media.FileCryptoProvider); ok {
+		if provider.GetFileCryptoConfig() != nil {
+			return errors.New("file_encryption_key is not supported by the s3 media handler")
+		}
+	}
 
 	var sess *session.Session
 	if sess, err = session.NewSession(&aws.Config{
