@@ -25,6 +25,7 @@ import (
 	ms "github.com/go-sql-driver/mysql"
 	"github.com/jmoiron/sqlx"
 	"github.com/tinode/chat/server/auth"
+	srvcrypt "github.com/tinode/chat/server/crypt"
 	"github.com/tinode/chat/server/db/common"
 	"github.com/tinode/chat/server/media"
 	"github.com/tinode/chat/server/store"
@@ -40,6 +41,8 @@ type adapter struct {
 	messageCipher cipher.AEAD
 	// Optional AEAD cipher for encrypting uploaded file payloads at rest.
 	fileCipher cipher.AEAD
+	// Optional external crypto backend for message payload encryption.
+	messageCrypt srvcrypt.MessageHandler
 	// Maximum number of records to return
 	maxResults int
 	// Maximum number of message records to return
@@ -160,6 +163,14 @@ func (a *adapter) Open(jsonconfig json.RawMessage) error {
 	if a.fileCipher, err = initConfiguredCipher("file_encryption_key", config.FileEncryptionKey); err != nil {
 		return err
 	}
+	a.messageCrypt = nil
+	if handler := store.Store.GetCryptoHandler(); handler != nil {
+		msgCrypt, ok := handler.(srvcrypt.MessageHandler)
+		if !ok {
+			return errors.New("mysql adapter: configured crypto handler does not support message encryption")
+		}
+		a.messageCrypt = msgCrypt
+	}
 
 	if dsn := config.FormatDSN(); dsn != defaultCfg.FormatDSN() {
 		// MySql config is specified. Use it.
@@ -277,7 +288,13 @@ func (a *adapter) messageAAD(field string) []byte {
 
 func (a *adapter) encodeStoredMessageField(field string, value any) ([]byte, error) {
 	raw := common.ToJSON(value)
-	if raw == nil || a.messageCipher == nil {
+	if raw == nil {
+		return raw, nil
+	}
+	if a.messageCrypt != nil {
+		return a.messageCrypt.EncryptMessage(field, raw)
+	}
+	if a.messageCipher == nil {
 		return raw, nil
 	}
 
@@ -307,12 +324,24 @@ func (a *adapter) decodeStoredMessageField(field string, raw []byte) ([]byte, er
 	if len(raw) == 0 {
 		return raw, nil
 	}
+	if a.messageCrypt != nil {
+		plaintext, handled, err := a.messageCrypt.DecryptMessage(field, raw)
+		if err != nil {
+			return nil, err
+		}
+		if handled {
+			return plaintext, nil
+		}
+	}
 
 	envelope, encrypted, err := parseEncryptedMessageEnvelope(raw)
 	if err != nil {
 		return nil, fmt.Errorf("mysql adapter: failed to parse stored %s: %w", field, err)
 	}
 	if !encrypted {
+		if looksLikeStoredEncryptionEnvelope(raw) {
+			return nil, fmt.Errorf("mysql adapter: %s is encrypted but no suitable handler is configured", field)
+		}
 		return raw, nil
 	}
 	if a.messageCipher == nil {
@@ -337,6 +366,25 @@ func (a *adapter) decodeStoredMessageField(field string, raw []byte) ([]byte, er
 	}
 
 	return plaintext, nil
+}
+
+func looksLikeStoredEncryptionEnvelope(raw []byte) bool {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || raw[0] != '{' {
+		return false
+	}
+
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return false
+	}
+
+	for key := range probe {
+		if strings.HasPrefix(key, "__tinode_") && strings.HasSuffix(key, "_enc") {
+			return true
+		}
+	}
+	return false
 }
 
 func parseEncryptedMessageEnvelope(raw []byte) (*encryptedMessagePayload, bool, error) {

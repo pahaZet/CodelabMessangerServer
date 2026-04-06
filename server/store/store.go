@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/tinode/chat/server/auth"
+	srvcrypt "github.com/tinode/chat/server/crypt"
 	adapter "github.com/tinode/chat/server/db"
 	"github.com/tinode/chat/server/logs"
 	"github.com/tinode/chat/server/media"
@@ -20,6 +21,8 @@ import (
 var adp adapter.Adapter
 var availableAdapters = make(map[string]adapter.Adapter)
 var mediaHandler media.Handler
+var cryptoHandler srvcrypt.Handler
+var cryptoHandlers = make(map[string]srvcrypt.Handler)
 
 // Unique ID generator
 var uGen types.UidGenerator
@@ -33,6 +36,13 @@ type configType struct {
 	UseAdapter string `json:"use_adapter"`
 	// Configurations for individual adapters.
 	Adapters map[string]json.RawMessage `json:"adapters"`
+	// Optional encryption backend for message/file at-rest encryption.
+	Crypto *CryptoConfig `json:"crypto,omitempty"`
+}
+
+type CryptoConfig struct {
+	UseHandler string                     `json:"use_handler"`
+	Handlers   map[string]json.RawMessage `json:"handlers"`
 }
 
 func openAdapter(workerId int, jsonconf json.RawMessage) error {
@@ -72,6 +82,10 @@ func openAdapter(workerId int, jsonconf json.RawMessage) error {
 		return errors.New("store: failed to init snowflake: " + err.Error())
 	}
 
+	if err := Store.UseCryptoHandler(config.Crypto); err != nil {
+		return err
+	}
+
 	if err := adp.SetMaxResults(config.MaxResults); err != nil {
 		return err
 	}
@@ -102,7 +116,9 @@ type PersistentStorageInterface interface {
 	GetAuthHandler(name string) auth.AuthHandler
 	GetLogicalAuthHandler(name string) auth.AuthHandler
 	GetValidator(name string) validate.Validator
+	GetCryptoHandler() srvcrypt.Handler
 	GetMediaHandler() media.Handler
+	UseCryptoHandler(config *CryptoConfig) error
 	UseMediaHandler(name, config string) error
 }
 
@@ -932,6 +948,11 @@ func (storeObj) GetValidator(name string) validate.Validator {
 	return validators[strings.ToLower(name)]
 }
 
+// GetCryptoHandler returns configured encryption backend.
+func (storeObj) GetCryptoHandler() srvcrypt.Handler {
+	return cryptoHandler
+}
+
 // DevicePersistenceInterface is an interface which defines methods used for handling device IDs.
 // Mostly used to generate push notifications.
 type DevicePersistenceInterface interface {
@@ -975,6 +996,44 @@ func (deviceMapper) Delete(uid types.Uid, deviceID string) error {
 
 // Registered media/file handlers.
 var fileHandlers map[string]media.Handler
+
+// RegisterCryptoHandler saves reference to an encryption handler.
+func RegisterCryptoHandler(name string, ch srvcrypt.Handler) {
+	if ch == nil {
+		panic("RegisterCryptoHandler: handler is nil")
+	}
+	if _, dup := cryptoHandlers[name]; dup {
+		panic("RegisterCryptoHandler: called twice for handler " + name)
+	}
+	cryptoHandlers[name] = ch
+}
+
+// UseCryptoHandler sets specified encryption handler as default.
+func (storeObj) UseCryptoHandler(config *CryptoConfig) error {
+	cryptoHandler = nil
+	if config == nil || config.UseHandler == "" {
+		return nil
+	}
+
+	ch := cryptoHandlers[config.UseHandler]
+	if ch == nil {
+		return fmt.Errorf("UseCryptoHandler: unknown handler '%s'", config.UseHandler)
+	}
+
+	var conf string
+	if config.Handlers != nil {
+		if params := config.Handlers[config.UseHandler]; params != nil {
+			conf = string(params)
+		}
+	}
+
+	if err := ch.Init(conf); err != nil {
+		return err
+	}
+
+	cryptoHandler = ch
+	return nil
+}
 
 // RegisterMediaHandler saves reference to a media handler (file upload-download handler).
 func RegisterMediaHandler(name string, mh media.Handler) {

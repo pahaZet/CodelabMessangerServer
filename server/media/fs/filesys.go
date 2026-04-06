@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	srvcrypt "github.com/tinode/chat/server/crypt"
 	"github.com/tinode/chat/server/logs"
 	"github.com/tinode/chat/server/media"
 	"github.com/tinode/chat/server/store"
@@ -42,6 +43,7 @@ type fshandler struct {
 	// corsOrigins parsed allowed origins.
 	corsOrigins []media.AllowedOrigin
 	fileCrypto  *media.FileCryptoConfig
+	fileCrypt   srvcrypt.FileHandler
 }
 
 func (fh *fshandler) Init(jsconf string) error {
@@ -68,6 +70,14 @@ func (fh *fshandler) Init(jsconf string) error {
 		return errors.New("failed to parse CORS allowed origins: " + err.Error())
 	}
 	fh.fileCrypto = nil
+	fh.fileCrypt = nil
+	if handler := store.Store.GetCryptoHandler(); handler != nil {
+		fileCrypt, ok := handler.(srvcrypt.FileHandler)
+		if !ok {
+			return errors.New("configured crypto handler does not support file encryption")
+		}
+		fh.fileCrypt = fileCrypt
+	}
 	if provider, ok := store.Store.GetAdapter().(media.FileCryptoProvider); ok {
 		fh.fileCrypto = provider.GetFileCryptoConfig()
 	}
@@ -135,7 +145,12 @@ func (fh *fshandler) Upload(fdef *types.FileDef, file io.Reader) (string, int64,
 		return "", 0, err
 	}
 
-	size, err := media.EncryptStream(outfile, file, fh.fileCrypto, fdef.Id)
+	var size int64
+	if fh.fileCrypt != nil {
+		size, err = fh.fileCrypt.EncryptFile(outfile, file, fdef.Id)
+	} else {
+		size, err = media.EncryptStream(outfile, file, fh.fileCrypto, fdef.Id)
+	}
 	outfile.Close()
 	if err != nil {
 		os.Remove(location)
@@ -176,6 +191,16 @@ func (fh *fshandler) Download(url string) (*types.FileDef, media.ReadSeekCloser,
 			err = types.ErrNotFound
 		}
 		return nil, nil, err
+	}
+
+	if fh.fileCrypt != nil {
+		rsc, handled, err := fh.fileCrypt.DecryptFile(file, fd.Id)
+		if err != nil {
+			return nil, nil, err
+		}
+		if handled {
+			return fd, rsc, nil
+		}
 	}
 
 	rsc, err := media.WrapEncryptedReadSeekCloser(file, fh.fileCrypto, fd.Id)

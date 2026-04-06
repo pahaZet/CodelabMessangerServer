@@ -11,8 +11,10 @@ import (
 
 	gomock "github.com/golang/mock/gomock"
 	auth "github.com/tinode/chat/server/auth"
+	srvcrypt "github.com/tinode/chat/server/crypt"
 	adapter "github.com/tinode/chat/server/db"
 	media "github.com/tinode/chat/server/media"
+	store "github.com/tinode/chat/server/store"
 	types "github.com/tinode/chat/server/store/types"
 	validate "github.com/tinode/chat/server/validate"
 )
@@ -180,6 +182,20 @@ func (mr *MockPersistentStorageInterfaceMockRecorder) GetMediaHandler() *gomock.
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetMediaHandler", reflect.TypeOf((*MockPersistentStorageInterface)(nil).GetMediaHandler))
 }
 
+// GetCryptoHandler mocks base method.
+func (m *MockPersistentStorageInterface) GetCryptoHandler() srvcrypt.Handler {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetCryptoHandler")
+	ret0, _ := ret[0].(srvcrypt.Handler)
+	return ret0
+}
+
+// GetCryptoHandler indicates an expected call of GetCryptoHandler.
+func (mr *MockPersistentStorageInterfaceMockRecorder) GetCryptoHandler() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetCryptoHandler", reflect.TypeOf((*MockPersistentStorageInterface)(nil).GetCryptoHandler))
+}
+
 // GetUid mocks base method.
 func (m *MockPersistentStorageInterface) GetUid() types.Uid {
 	m.ctrl.T.Helper()
@@ -290,6 +306,20 @@ func (m *MockPersistentStorageInterface) UseMediaHandler(name, config string) er
 func (mr *MockPersistentStorageInterfaceMockRecorder) UseMediaHandler(name, config interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UseMediaHandler", reflect.TypeOf((*MockPersistentStorageInterface)(nil).UseMediaHandler), name, config)
+}
+
+// UseCryptoHandler mocks base method.
+func (m *MockPersistentStorageInterface) UseCryptoHandler(config *store.CryptoConfig) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "UseCryptoHandler", config)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// UseCryptoHandler indicates an expected call of UseCryptoHandler.
+func (mr *MockPersistentStorageInterfaceMockRecorder) UseCryptoHandler(config interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UseCryptoHandler", reflect.TypeOf((*MockPersistentStorageInterface)(nil).UseCryptoHandler), config)
 }
 
 // MockUsersPersistenceInterface is a mock of UsersPersistenceInterface interface.

@@ -12,6 +12,7 @@ import (
 )
 
 var encryptedMediaMagic = []byte("TINODE_MEDIA_V1\x00")
+var encryptedMediaPrefix = []byte("TINODE_MEDIA_")
 
 const defaultEncryptedChunkSize = 64 * 1024
 
@@ -138,6 +139,10 @@ func WrapEncryptedReadSeekCloser(file *os.File, cfg *FileCryptoConfig, fileID st
 		return nil, err
 	}
 	if n != len(encryptedMediaMagic) || !bytes.Equal(magic, encryptedMediaMagic) {
+		if bytes.HasPrefix(magic, encryptedMediaPrefix) {
+			file.Close()
+			return nil, errors.New("media file is encrypted but no suitable handler is configured")
+		}
 		if _, err = file.Seek(0, io.SeekStart); err != nil {
 			file.Close()
 			return nil, err

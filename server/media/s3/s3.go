@@ -21,6 +21,7 @@ import (
 	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/aws/aws-sdk-go/service/s3/s3manager"
 
+	srvcrypt "github.com/tinode/chat/server/crypt"
 	"github.com/tinode/chat/server/logs"
 	"github.com/tinode/chat/server/media"
 	"github.com/tinode/chat/server/store"
@@ -101,6 +102,11 @@ func (ah *awshandler) Init(jsconf string) error {
 	ah.corsOrigins, err = media.ParseCORSAllow(ah.conf.CorsOrigins)
 	if err != nil {
 		return errors.New("failed to parse CORS allowed origins: " + err.Error())
+	}
+	if handler := store.Store.GetCryptoHandler(); handler != nil {
+		if _, ok := handler.(srvcrypt.FileHandler); ok {
+			return errors.New("configured crypto handler is not supported by the s3 media handler")
+		}
 	}
 	if provider, ok := store.Store.GetAdapter().(media.FileCryptoProvider); ok {
 		if provider.GetFileCryptoConfig() != nil {

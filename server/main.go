@@ -32,6 +32,7 @@ import (
 	_ "github.com/tinode/chat/server/auth/code"
 	_ "github.com/tinode/chat/server/auth/rest"
 	_ "github.com/tinode/chat/server/auth/token"
+	_ "github.com/tinode/chat/server/crypt/vaulttransit"
 	"github.com/tinode/chat/server/store/types"
 
 	// Database backends
