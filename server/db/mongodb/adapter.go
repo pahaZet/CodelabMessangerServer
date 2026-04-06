@@ -2469,6 +2469,29 @@ func (a *adapter) MessageSave(msg *t.Message) error {
 	return err
 }
 
+func (a *adapter) MessageUpdateReceipts(topic string, from, to int, user t.Uid, what string, when time.Time) error {
+	if from > to || user.IsZero() {
+		return nil
+	}
+
+	filter := b.M{
+		"topic": topic,
+		"seqid": b.M{"$gte": from, "$lte": to},
+		"$or": b.A{
+			b.M{"delid": b.M{"$exists": false}},
+			b.M{"delid": 0},
+		},
+	}
+	path := "head.rcpt." + what + "." + user.UserId()
+	_, err := a.db.Collection("messages").UpdateMany(a.ctx, filter, b.M{
+		"$set": b.M{
+			"updatedat": when,
+			path:        when.UnixMilli(),
+		},
+	})
+	return err
+}
+
 // MessageGetAll returns messages matching the query.
 func (a *adapter) MessageGetAll(topic string, forUser t.Uid, opts *t.QueryOpt) ([]t.Message, error) {
 	var limit = a.maxMessageResults

@@ -2946,6 +2946,79 @@ func (a *adapter) MessageSave(msg *t.Message) error {
 	return err
 }
 
+func (a *adapter) MessageUpdateReceipts(topic string, from, to int, user t.Uid, what string, when time.Time) (err error) {
+	if from > to || user.IsZero() {
+		return nil
+	}
+	if what != "read" && what != "recv" {
+		return errors.New("mysql adapter: unsupported receipt type")
+	}
+
+	ctx, cancel := a.getContextForTx()
+	if cancel != nil {
+		defer cancel()
+	}
+
+	tx, err := a.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			tx.Rollback()
+		}
+	}()
+
+	rows, err := tx.QueryxContext(ctx,
+		"SELECT seqid, head FROM messages WHERE topic=? AND delid=0 AND seqid BETWEEN ? AND ?",
+		topic, from, to)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	type msgHeadUpdate struct {
+		seqId int
+		head  []byte
+	}
+	var updates []msgHeadUpdate
+	userID := user.UserId()
+
+	for rows.Next() {
+		var seqId int
+		var rawHead []byte
+		if err = rows.Scan(&seqId, &rawHead); err != nil {
+			return err
+		}
+
+		head, headErr := a.decodeMessageHead(rawHead)
+		if headErr != nil {
+			return headErr
+		}
+		head = t.SetMessageReceipt(head, what, userID, when)
+
+		encodedHead, encErr := a.encodeStoredMessageField("head", head)
+		if encErr != nil {
+			return encErr
+		}
+
+		updates = append(updates, msgHeadUpdate{seqId: seqId, head: encodedHead})
+	}
+	if err = rows.Err(); err != nil {
+		return err
+	}
+
+	for _, upd := range updates {
+		if _, err = tx.ExecContext(ctx,
+			"UPDATE messages SET updatedat=?, head=? WHERE topic=? AND seqid=? AND delid=0",
+			when, upd.head, topic, upd.seqId); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
 // MessageGetAll returns messages matching the query.
 func (a *adapter) MessageGetAll(topic string, forUser t.Uid, opts *t.QueryOpt) ([]t.Message, error) {
 	var limit = a.maxMessageResults

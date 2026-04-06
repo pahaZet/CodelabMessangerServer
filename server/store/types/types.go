@@ -1089,6 +1089,34 @@ type perUserData struct {
 // MessageHeaders is needed to attach Scan() to.
 type KVMap map[string]any
 
+func asKVMap(src any) KVMap {
+	switch typed := src.(type) {
+	case nil:
+		return make(KVMap, 1)
+	case KVMap:
+		return typed
+	case map[string]any:
+		return KVMap(typed)
+	default:
+		return make(KVMap, 1)
+	}
+}
+
+// SetMessageReceipt stores a per-user message receipt timestamp in the message header.
+func SetMessageReceipt(head KVMap, what, userID string, when time.Time) KVMap {
+	if head == nil {
+		head = make(KVMap, 1)
+	}
+
+	rcpt := asKVMap(head["rcpt"])
+	typed := asKVMap(rcpt[what])
+	typed[userID] = when.UnixMilli()
+	rcpt[what] = typed
+	head["rcpt"] = rcpt
+
+	return head
+}
+
 // Scan implements sql.Scanner interface.
 func (kvm *KVMap) Scan(val any) error {
 	if val == nil {
