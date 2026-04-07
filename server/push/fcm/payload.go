@@ -264,6 +264,12 @@ func androidNotificationConfig(what, topic string, data map[string]string, confi
 		Ttl:      timeToLive,
 	}
 
+	// Silent pushes must stay data-only so the Android client can process them in
+	// FirebaseMessagingService while the app is backgrounded.
+	if data["silent"] != "" {
+		return ac
+	}
+
 	// When this notification type is included and the app is not in the foreground
 	// Android won't wake up the app and won't call FirebaseMessagingService:onMessageReceived.
 	// See dicussion: https://github.com/firebase/quickstart-js/issues/71
