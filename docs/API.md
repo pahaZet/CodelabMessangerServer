@@ -235,7 +235,9 @@ If the session is not authenticated, the request must include a `token`. It can 
 
 #### Resetting a Password, i.e. "Forgot Password"
 
-To reset login or password, (or any other authentication secret, if such action is supported by the authenticator), one sends a `{login}` message with the `scheme` set to `reset` and the `secret` containing a base64-encoded string "`authentication scheme to reset secret for`:`reset method`:`reset method value`". Most basic case of resetting a password by email is
+To reset login or password, (or any other authentication secret, if such action is supported by the authenticator), one sends a `{login}` message with the `scheme` set to `reset`.
+
+Existing clients may keep using the original format where `secret` contains a base64-encoded string "`authentication scheme to reset secret for`:`reset method`:`reset method value`". Most basic case of resetting a password by email is
 ```js
 login: {
   id: "1a2b3",
@@ -244,6 +246,16 @@ login: {
 }
 ```
 where `jdoe@example.com` is an earlier validated user's email.
+
+Additionally, for resetting `basic` authentication by validated email, the server accepts a shortened format where the client passes just the reset method and the email:
+```js
+login: {
+  id: "1a2b3",
+  scheme: "reset",
+  secret: base64encode("email:jdoe@example.com")
+}
+```
+In this case the server finds the user by email, resolves the corresponding `basic` login in the database, then continues the normal password reset flow. This format is fully backward compatible with the original `basic:email:...` request and does not require any protobuf or wire schema changes.
 
 If the email matches the registration, the server will send a message using specified method and address with instructions for resetting the secret. The email contains a restricted security token which the user can include into an `{acc}` request with the new secret as described in [Changing Authentication Parameters](#changing-authentication-parameters).
 

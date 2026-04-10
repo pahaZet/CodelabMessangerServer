@@ -14,6 +14,26 @@ import (
 	"github.com/tinode/chat/server/store/types"
 )
 
+type resetCaptureValidator struct {
+	testValidator
+	cred   string
+	scheme string
+	lang   string
+	token  []byte
+	params map[string]any
+	calls  int
+}
+
+func (v *resetCaptureValidator) ResetSecret(cred, scheme, lang string, tmpToken []byte, params map[string]any) error {
+	v.cred = cred
+	v.scheme = scheme
+	v.lang = lang
+	v.token = append([]byte(nil), tmpToken...)
+	v.params = params
+	v.calls++
+	return nil
+}
+
 func test_makeSession(uid types.Uid) *Session {
 	return &Session{
 		send:         make(chan any, 10),
@@ -21,6 +41,117 @@ func test_makeSession(uid types.Uid) *Session {
 		authLvl:      auth.LevelAuth,
 		inflightReqs: newBoundedWaitGroup(1),
 		ver:          22,
+	}
+}
+
+func TestAuthSecretResetBasicByEmail(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	ss := mock_store.NewMockPersistentStorageInterface(ctrl)
+	uu := mock_store.NewMockUsersPersistenceInterface(ctrl)
+	ba := mock_auth.NewMockAuthHandler(ctrl)
+	ca := mock_auth.NewMockAuthHandler(ctrl)
+
+	oldStore := store.Store
+	oldUsers := store.Users
+	defer func() {
+		store.Store = oldStore
+		store.Users = oldUsers
+		ctrl.Finish()
+	}()
+
+	store.Store = ss
+	store.Users = uu
+
+	uid := types.Uid(101)
+	validator := &resetCaptureValidator{}
+
+	ss.EXPECT().GetLogicalAuthHandler("basic").Return(ba)
+	ss.EXPECT().GetValidator("email").Return(validator)
+	uu.EXPECT().GetByCred("email", "alice@example.com").Return(uid, nil)
+	ba.EXPECT().GetResetParams(uid).Return(map[string]any{"login": "alice"}, nil)
+	ss.EXPECT().GetLogicalAuthHandler("code").Return(ca)
+	ca.EXPECT().IsInitialized().Return(true)
+	ca.EXPECT().GenSecret(gomock.Any()).DoAndReturn(func(rec *auth.Rec) ([]byte, time.Time, error) {
+		if rec.Uid != uid {
+			t.Fatalf("uid=%v, want %v", rec.Uid, uid)
+		}
+		if rec.Credential != "email:alice@example.com" {
+			t.Fatalf("credential=%q, want %q", rec.Credential, "email:alice@example.com")
+		}
+		return []byte("123456"), time.Time{}, nil
+	})
+
+	s := &Session{sid: "sid1", lang: "ru"}
+	if err := s.authSecretReset([]byte("basic:email:alice@example.com")); err != nil {
+		t.Fatalf("authSecretReset() error = %v", err)
+	}
+
+	if validator.calls != 1 {
+		t.Fatalf("ResetSecret calls = %d, want 1", validator.calls)
+	}
+	if validator.cred != "alice@example.com" {
+		t.Fatalf("cred=%q, want %q", validator.cred, "alice@example.com")
+	}
+	if validator.scheme != "basic" {
+		t.Fatalf("scheme=%q, want %q", validator.scheme, "basic")
+	}
+	if validator.lang != "ru" {
+		t.Fatalf("lang=%q, want %q", validator.lang, "ru")
+	}
+	if string(validator.token) != "123456" {
+		t.Fatalf("token=%q, want %q", string(validator.token), "123456")
+	}
+	if validator.params["login"] != "alice" {
+		t.Fatalf("params[login]=%v, want %q", validator.params["login"], "alice")
+	}
+}
+
+func TestAuthSecretResetEmailOnly(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	ss := mock_store.NewMockPersistentStorageInterface(ctrl)
+	uu := mock_store.NewMockUsersPersistenceInterface(ctrl)
+	ba := mock_auth.NewMockAuthHandler(ctrl)
+	ca := mock_auth.NewMockAuthHandler(ctrl)
+
+	oldStore := store.Store
+	oldUsers := store.Users
+	defer func() {
+		store.Store = oldStore
+		store.Users = oldUsers
+		ctrl.Finish()
+	}()
+
+	store.Store = ss
+	store.Users = uu
+
+	uid := types.Uid(202)
+	validator := &resetCaptureValidator{}
+
+	ss.EXPECT().GetLogicalAuthHandler("basic").Return(ba).Times(2)
+	ba.EXPECT().GetRealName().Return("basic")
+	ss.EXPECT().GetValidator("email").Return(validator)
+	uu.EXPECT().GetByCred("email", "alice@example.com").Return(uid, nil)
+	ba.EXPECT().GetResetParams(uid).Return(map[string]any{"login": "alice"}, nil)
+	ss.EXPECT().GetLogicalAuthHandler("code").Return(ca)
+	ca.EXPECT().IsInitialized().Return(true)
+	ca.EXPECT().GenSecret(gomock.Any()).Return([]byte("654321"), time.Time{}, nil)
+
+	s := &Session{sid: "sid2", lang: "en"}
+	if err := s.authSecretReset([]byte("email:alice@example.com")); err != nil {
+		t.Fatalf("authSecretReset() error = %v", err)
+	}
+
+	if validator.calls != 1 {
+		t.Fatalf("ResetSecret calls = %d, want 1", validator.calls)
+	}
+	if validator.scheme != "basic" {
+		t.Fatalf("scheme=%q, want %q", validator.scheme, "basic")
+	}
+	if validator.cred != "alice@example.com" {
+		t.Fatalf("cred=%q, want %q", validator.cred, "alice@example.com")
+	}
+	if string(validator.token) != "654321" {
+		t.Fatalf("token=%q, want %q", string(validator.token), "654321")
 	}
 }
 

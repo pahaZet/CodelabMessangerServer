@@ -991,15 +991,14 @@ func (s *Session) login(msg *ClientComMessage) {
 	}
 }
 
-// authSecretReset resets an authentication secret;
-// params: "auth-method-to-reset:credential-method:credential-value",
-// for example: "basic:email:alice@example.com".
+// authSecretReset resets an authentication secret.
+// Supported formats:
+//   - "auth-method-to-reset:credential-method:credential-value", e.g. "basic:email:alice@example.com".
+//   - "email:alice@example.com" for resetting basic auth by validated email only.
 func (s *Session) authSecretReset(params []byte) error {
-	var authScheme, credMethod, credValue string
-	if parts := strings.Split(string(params), ":"); len(parts) >= 3 {
-		authScheme, credMethod, credValue = parts[0], parts[1], parts[2]
-	} else {
-		return types.ErrMalformed
+	authScheme, credMethod, credValue, err := s.parseAuthSecretResetParams(params)
+	if err != nil {
+		return err
 	}
 
 	// Technically we don't need to check it here, but we are going to mail the 'authScheme' string to the user.
@@ -1047,6 +1046,49 @@ func (s *Session) authSecretReset(params []byte) error {
 	}
 
 	return validator.ResetSecret(credValue, authScheme, s.lang, code, resetParams)
+}
+
+func (s *Session) parseAuthSecretResetParams(params []byte) (authScheme, credMethod, credValue string, err error) {
+	parts := strings.SplitN(string(params), ":", 3)
+	switch len(parts) {
+	case 3:
+		return parts[0], parts[1], parts[2], nil
+	case 2:
+		if strings.ToLower(parts[0]) != "email" {
+			return "", "", "", types.ErrMalformed
+		}
+		authScheme, err = s.getBasicResetAuthScheme()
+		if err != nil {
+			return "", "", "", err
+		}
+		return authScheme, parts[0], parts[1], nil
+	default:
+		return "", "", "", types.ErrMalformed
+	}
+}
+
+func (s *Session) getBasicResetAuthScheme() (string, error) {
+	if auther := store.Store.GetLogicalAuthHandler("basic"); auther != nil && auther.GetRealName() == "basic" {
+		return "basic", nil
+	}
+
+	var candidate string
+	for _, name := range store.Store.GetAuthNames() {
+		auther := store.Store.GetLogicalAuthHandler(name)
+		if auther == nil || auther.GetRealName() != "basic" {
+			continue
+		}
+		if candidate != "" && candidate != name {
+			logs.Warn.Println("s.authSecretReset: multiple addressable basic auth schemes", candidate, name, s.sid)
+			return "", types.ErrUnsupported
+		}
+		candidate = name
+	}
+	if candidate == "" {
+		return "", types.ErrUnsupported
+	}
+
+	return candidate, nil
 }
 
 // onLogin performs steps after successful authentication.
