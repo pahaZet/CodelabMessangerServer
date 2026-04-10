@@ -159,6 +159,8 @@ type Adapter interface {
 
 	// MessageSave saves message to database
 	MessageSave(msg *t.Message) error
+	// MessageUpdateReceipts stores per-user delivery/read timestamps in message headers.
+	MessageUpdateReceipts(topic string, from, to int, user t.Uid, what string, when time.Time) error
 	// MessageGetAll returns messages matching the query
 	MessageGetAll(topic string, forUser t.Uid, opts *t.QueryOpt) ([]t.Message, error)
 	// MessageDeleteList marks messages as deleted.

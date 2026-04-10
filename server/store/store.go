@@ -683,6 +683,7 @@ func (subsMapper) Delete(topic string, user types.Uid) error {
 // MessagesPersistenceInterface is an interface which defines methods for persistent storage of messages.
 type MessagesPersistenceInterface interface {
 	Save(msg *types.Message, attachmentURLs []string, readBySender bool) (error, bool)
+	UpdateReceipts(topic string, from, to int, user types.Uid, what string, when time.Time) error
 	DeleteList(topic string, delID int, forUser types.Uid, msgDelAge time.Duration, ranges []types.Range) error
 	GetAll(topic string, forUser types.Uid, opt *types.QueryOpt) ([]types.Message, error)
 	GetDeleted(topic string, forUser types.Uid, opt *types.QueryOpt) ([]types.Range, int, error)
@@ -741,6 +742,17 @@ func (messagesMapper) Save(msg *types.Message, attachmentURLs []string, readBySe
 	}
 
 	return nil, markedReadBySender
+}
+
+// UpdateReceipts stores per-user delivery/read timestamps for a range of messages.
+func (messagesMapper) UpdateReceipts(topic string, from, to int, user types.Uid, what string, when time.Time) error {
+	if topic == "" || from > to || user.IsZero() {
+		return nil
+	}
+	if what != "read" && what != "recv" {
+		return fmt.Errorf("unsupported receipt type %q", what)
+	}
+	return adp.MessageUpdateReceipts(topic, from, to, user, what, when)
 }
 
 // DeleteList deletes multiple messages defined by a list of ranges.

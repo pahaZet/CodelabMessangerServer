@@ -2223,6 +2223,31 @@ func (a *adapter) MessageSave(msg *t.Message) error {
 	return err
 }
 
+func (a *adapter) MessageUpdateReceipts(topic string, from, to int, user t.Uid, what string, when time.Time) error {
+	if from > to || user.IsZero() {
+		return nil
+	}
+
+	head := rdb.Row.Field("Head").Default(map[string]any{})
+	rcpt := head.Field("rcpt").Default(map[string]any{})
+	typed := rcpt.Field(what).Default(map[string]any{})
+
+	_, err := rdb.DB(a.dbName).Table("messages").
+		Between([]any{topic, from}, []any{topic, to + 1}, rdb.BetweenOpts{Index: "Topic_SeqId"}).
+		Filter(rdb.Row.Field("DelId").Default(0).Eq(0)).
+		Update(map[string]any{
+			"UpdatedAt": when,
+			"Head": head.Merge(map[string]any{
+				"rcpt": rcpt.Merge(map[string]any{
+					what: typed.Merge(map[string]any{
+						user.UserId(): when.UnixMilli(),
+					}),
+				}),
+			}),
+		}, rdb.UpdateOpts{NonAtomic: true}).RunWrite(a.conn)
+	return err
+}
+
 // MessageGetAll retrieves all messages available to the given user.
 func (a *adapter) MessageGetAll(topic string, forUser t.Uid, opts *t.QueryOpt) ([]t.Message, error) {
 

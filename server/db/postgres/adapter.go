@@ -2616,6 +2616,30 @@ func (a *adapter) MessageSave(msg *t.Message) error {
 	return err
 }
 
+func (a *adapter) MessageUpdateReceipts(topic string, from, to int, user t.Uid, what string, when time.Time) error {
+	if from > to || user.IsZero() {
+		return nil
+	}
+
+	ctx, cancel := a.getContext()
+	if cancel != nil {
+		defer cancel()
+	}
+
+	_, err := a.db.Exec(ctx,
+		`UPDATE messages
+			SET updatedat=$1,
+			    head=jsonb_set(
+			        COALESCE(head::jsonb, '{}'::jsonb),
+			        ARRAY['rcpt', $2::text, $3::text],
+			        to_jsonb($4::bigint),
+			        true
+			    )::json
+			WHERE topic=$5 AND delid=0 AND seqid BETWEEN $6 AND $7`,
+		when, what, user.UserId(), when.UnixMilli(), topic, from, to)
+	return err
+}
+
 func (a *adapter) MessageGetAll(topic string, forUser t.Uid, opts *t.QueryOpt) ([]t.Message, error) {
 	var limit = a.maxMessageResults
 

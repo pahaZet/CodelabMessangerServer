@@ -1178,6 +1178,7 @@ func (t *Topic) handleNoteBroadcast(msg *ClientComMessage) {
 	}
 
 	var read, recv, unread, seq int
+	receiptFrom := 0
 
 	switch msg.Note.What {
 	case "read":
@@ -1186,6 +1187,7 @@ func (t *Topic) handleNoteBroadcast(msg *ClientComMessage) {
 			return
 		}
 
+		receiptFrom = pud.readID + 1
 		// The number of unread messages has decreased, negative value.
 		unread = pud.readID - msg.Note.SeqId
 		pud.readID = msg.Note.SeqId
@@ -1200,6 +1202,7 @@ func (t *Topic) handleNoteBroadcast(msg *ClientComMessage) {
 			return
 		}
 
+		receiptFrom = pud.recvID + 1
 		pud.recvID = msg.Note.SeqId
 		if pud.readID > pud.recvID {
 			pud.recvID = pud.readID
@@ -1224,6 +1227,12 @@ func (t *Topic) handleNoteBroadcast(msg *ClientComMessage) {
 		if err := store.Subs.Update(topicName, asUid, upd); err != nil {
 			logs.Warn.Printf("topic[%s]: failed to update SeqRead/Recv counter: %v", t.name, err)
 			return
+		}
+		if receiptFrom > 0 && t.cat == types.TopicCatGrp && !t.isChan {
+			if err := store.Messages.UpdateReceipts(topicName, receiptFrom, seq, asUid, msg.Note.What, msg.Timestamp); err != nil {
+				logs.Warn.Printf("topic[%s]: failed to update %s receipts for messages [%d..%d]: %v",
+					t.name, msg.Note.What, receiptFrom, seq, err)
+			}
 		}
 
 		// Read/recv updated: notify user's other sessions of the change
